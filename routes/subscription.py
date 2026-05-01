@@ -17,9 +17,18 @@ async def create_subscription(user: dict = Depends(verify_token)):
     uid = user["uid"]
     user_doc = db.collection("users").document(uid).get()
     if not user_doc.exists:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    user_data = user_doc.to_dict()
+        db.collection("users").document(uid).set({
+            "uid": uid,
+            "email": user.get("email", ""),
+            "subscriptionStatus": "trial",
+            "createdAt": datetime.now(timezone.utc),
+            "trialStartedAt": datetime.now(timezone.utc),
+            "trialEndsAt": datetime.now(timezone.utc) + timedelta(days=14),
+            "stripeCustomerId": None,
+        })
+        user_data = {"stripeCustomerId": None, "email": user.get("email", "")}
+    else:
+        user_data = user_doc.to_dict()
     customer_id = user_data.get("stripeCustomerId")
 
     # Create Stripe customer if not exists
@@ -84,6 +93,49 @@ async def confirm_subscription(user: dict = Depends(verify_token)):
     })
 
     return JSONResponse({"status": "subscribed", "subscriptionId": subscription.id})
+
+
+@router.get("/user-status")
+async def get_user_status(user: dict = Depends(verify_token)):
+    uid = user["uid"]
+    user_doc = db.collection("users").document(uid).get()
+    if not user_doc.exists:
+        return JSONResponse({"subscriptionStatus": "none"})
+    data = user_doc.to_dict() or {}
+    status = data.get("subscriptionStatus", "none")
+    trial_ends_at = data.get("trialEndsAt")
+    if status == "trial" and trial_ends_at:
+        if hasattr(trial_ends_at, "timestamp"):
+            if trial_ends_at.timestamp() < datetime.now(timezone.utc).timestamp():
+                status = "expired"
+    return JSONResponse({"subscriptionStatus": status})
+
+
+@router.post("/start-trial")
+async def start_trial(user: dict = Depends(verify_token)):
+    uid = user["uid"]
+    user_doc = db.collection("users").document(uid).get()
+    if user_doc.exists:
+        data = user_doc.to_dict() or {}
+        current_status = data.get("subscriptionStatus", "none")
+        if current_status in ("trial", "active"):
+            return JSONResponse({"status": current_status})
+        db.collection("users").document(uid).update({
+            "subscriptionStatus": "trial",
+            "trialStartedAt": datetime.now(timezone.utc),
+            "trialEndsAt": datetime.now(timezone.utc) + timedelta(days=14),
+        })
+    else:
+        db.collection("users").document(uid).set({
+            "uid": uid,
+            "email": user.get("email", ""),
+            "subscriptionStatus": "trial",
+            "createdAt": datetime.now(timezone.utc),
+            "trialStartedAt": datetime.now(timezone.utc),
+            "trialEndsAt": datetime.now(timezone.utc) + timedelta(days=14),
+            "stripeCustomerId": None,
+        })
+    return JSONResponse({"status": "trial"})
 
 
 @router.post("/stripe-webhook")
