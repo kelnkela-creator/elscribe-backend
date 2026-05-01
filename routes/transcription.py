@@ -4,7 +4,7 @@ import openai
 import tempfile
 import os
 import subprocess
-from services.firebase_service import verify_token, is_subscription_active
+from services.firebase_service import verify_token
 
 router = APIRouter()
 
@@ -22,15 +22,36 @@ def get_openai_client():
     return openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
-async def check_subscription(user: dict = Depends(verify_token)):
-    uid = user["uid"]
-    active = await is_subscription_active(uid)
-    if not active:
-        raise HTTPException(
-            status_code=403,
-            detail="No active subscription. Please subscribe to continue."
+def add_speaker_labels(transcript_text: str, client) -> str:
+    """Use GPT to add speaker/Q&A labels to the transcript."""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a transcript formatter. Analyze and format the transcript with speaker labels.\n\n"
+                        "Rules:\n"
+                        "- If there are clearly multiple speakers (interview, conversation, Q&A, meeting, dialogue), "
+                        "label each turn as [Speaker 1]:, [Speaker 2]:, etc.\n"
+                        "- For clear question-and-answer sections where one person asks and another answers, "
+                        "use [Question]: and [Answer]: labels.\n"
+                        "- If it appears to be a single speaker (monologue, lecture, voiceover, solo recording), "
+                        "return the text as-is without any labels.\n"
+                        "- Each new speaker segment must start on its own line.\n"
+                        "- Keep all original words exactly unchanged — do not paraphrase.\n"
+                        "- Output ONLY the formatted transcript, no explanations or commentary."
+                    ),
+                },
+                {"role": "user", "content": transcript_text},
+            ],
+            max_tokens=4000,
+            temperature=0.1,
         )
-    return user
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return transcript_text
 
 
 @router.post("/transcribe")
@@ -54,7 +75,7 @@ async def transcribe(
         tmp_path = tmp.name
 
     try:
-        # Get duration using ffprobe if available
+        # Get duration via ffprobe
         duration_seconds = 0
         try:
             result = subprocess.run(
@@ -73,13 +94,16 @@ async def transcribe(
                 model="whisper-1",
                 file=audio_file,
                 language="en",
-                response_format="text"
+                response_format="text",
             )
 
-        transcript_text = response if isinstance(response, str) else response.text
+        raw_text = response if isinstance(response, str) else response.text
+
+        # Add speaker/Q&A labels via GPT
+        labeled_text = add_speaker_labels(raw_text, client)
 
         return JSONResponse({
-            "transcript": transcript_text,
+            "transcript": labeled_text,
             "duration_seconds": duration_seconds,
             "filename": file.filename,
         })

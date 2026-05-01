@@ -10,6 +10,7 @@ load_dotenv()
 
 from routes.transcription import router as transcription_router
 from routes.subscription import router as subscription_router
+from routes.chat import router as chat_router
 from services.firebase_service import verify_token
 
 app = FastAPI(
@@ -28,6 +29,7 @@ app.add_middleware(
 
 app.include_router(transcription_router)
 app.include_router(subscription_router)
+app.include_router(chat_router)
 
 @app.get("/")
 async def root():
