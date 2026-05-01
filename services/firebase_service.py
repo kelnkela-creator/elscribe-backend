@@ -34,10 +34,13 @@ async def verify_token(authorization: str = Header(...)) -> dict:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 async def get_user_data(uid: str) -> dict:
-    doc = db.collection("users").document(uid).get()
-    if not doc.exists:
-        raise HTTPException(status_code=404, detail="User not found")
-    return doc.to_dict()
+    try:
+        doc = db.collection("users").document(uid).get()
+        if not doc.exists:
+            return {}
+        return doc.to_dict() or {}
+    except Exception:
+        return {}
 
 async def is_subscription_active(uid: str) -> bool:
     from datetime import datetime, timezone
@@ -50,4 +53,6 @@ async def is_subscription_active(uid: str) -> bool:
         if trial_ends:
             if hasattr(trial_ends, 'timestamp'):
                 return trial_ends.timestamp() > datetime.now(timezone.utc).timestamp()
+        else:
+            return True
     return False
