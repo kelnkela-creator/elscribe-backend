@@ -36,7 +36,7 @@ async def check_subscription(user: dict = Depends(verify_token)):
 @router.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
-    user: dict = Depends(check_subscription),
+    user: dict = Depends(verify_token),
 ):
     ext = file.filename.split('.')[-1].lower() if file.filename else ''
     if ext not in ALLOWED_EXTENSIONS:
