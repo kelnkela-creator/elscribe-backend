@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import openai
 import tempfile
 import os
@@ -22,8 +23,14 @@ def get_openai_client():
     return openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
-def add_speaker_labels(transcript_text: str, client) -> str:
-    """Use GPT to add speaker/Q&A labels to the transcript."""
+class LabelRequest(BaseModel):
+    text: str
+
+
+@router.post("/label")
+async def label_transcript(request: LabelRequest, user: dict = Depends(verify_token)):
+    """Add speaker/Q&A labels to a raw transcript using GPT."""
+    client = get_openai_client()
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -31,27 +38,25 @@ def add_speaker_labels(transcript_text: str, client) -> str:
                 {
                     "role": "system",
                     "content": (
-                        "You are a transcript formatter. Analyze and format the transcript with speaker labels.\n\n"
+                        "You are a transcript formatter. Format with speaker labels.\n"
                         "Rules:\n"
-                        "- If there are clearly multiple speakers (interview, conversation, Q&A, meeting, dialogue), "
-                        "label each turn as [Speaker 1]:, [Speaker 2]:, etc.\n"
-                        "- For clear question-and-answer sections where one person asks and another answers, "
-                        "use [Question]: and [Answer]: labels.\n"
-                        "- If it appears to be a single speaker (monologue, lecture, voiceover, solo recording), "
-                        "return the text as-is without any labels.\n"
-                        "- Each new speaker segment must start on its own line.\n"
-                        "- Keep all original words exactly unchanged — do not paraphrase.\n"
-                        "- Output ONLY the formatted transcript, no explanations or commentary."
+                        "- Multiple speakers (interview/conversation/Q&A): label as [Speaker 1]:, [Speaker 2]:, etc.\n"
+                        "- Clear Q&A sections: use [Question]: and [Answer]:\n"
+                        "- Single speaker (monologue/lecture): return text as-is, no labels\n"
+                        "- Each speaker segment on its own line\n"
+                        "- Keep original words exactly unchanged\n"
+                        "- Output ONLY the formatted transcript"
                     ),
                 },
-                {"role": "user", "content": transcript_text},
+                {"role": "user", "content": request.text},
             ],
-            max_tokens=4000,
-            temperature=0.1,
+            max_tokens=3000,
+            temperature=0,
         )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        return transcript_text
+        labeled = response.choices[0].message.content.strip()
+        return JSONResponse({"labeled_transcript": labeled})
+    except Exception as e:
+        return JSONResponse({"labeled_transcript": request.text})
 
 
 @router.post("/transcribe")
@@ -75,7 +80,6 @@ async def transcribe(
         tmp_path = tmp.name
 
     try:
-        # Get duration via ffprobe
         duration_seconds = 0
         try:
             result = subprocess.run(
@@ -87,7 +91,6 @@ async def transcribe(
         except Exception:
             pass
 
-        # Transcribe with Whisper
         client = get_openai_client()
         with open(tmp_path, 'rb') as audio_file:
             response = client.audio.transcriptions.create(
@@ -99,11 +102,8 @@ async def transcribe(
 
         raw_text = response if isinstance(response, str) else response.text
 
-        # Add speaker/Q&A labels via GPT
-        labeled_text = add_speaker_labels(raw_text, client)
-
         return JSONResponse({
-            "transcript": labeled_text,
+            "transcript": raw_text,
             "duration_seconds": duration_seconds,
             "filename": file.filename,
         })
