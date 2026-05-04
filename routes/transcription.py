@@ -1,4 +1,6 @@
 import math
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -83,19 +85,16 @@ LABEL_SYSTEM = (
     "- Keep EVERY word exactly unchanged — do NOT skip or summarize anything\n"
     "- Output ONLY the formatted transcript"
 )
-WORDS_PER_CHUNK = 1200  # safe chunk size so output never hits token limit
+WORDS_PER_CHUNK = 4000   # large chunks → fewer API calls; 16k output tokens handles this easily
 
 
-def _label_chunk(client, text: str, prev_tail: str = "") -> str:
-    system = LABEL_SYSTEM
-    if prev_tail:
-        system += f"\n\nEnd of previous section (for speaker continuity):\n{prev_tail}"
+def _label_chunk(client, text: str) -> str:
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": system},
+            messages=[{"role": "system", "content": LABEL_SYSTEM},
                       {"role": "user", "content": text}],
-            max_tokens=4000,
+            max_tokens=16000,
             temperature=0,
         )
         return r.choices[0].message.content.strip()
@@ -109,14 +108,23 @@ async def label_transcript(request: LabelRequest, user: dict = Depends(verify_to
     try:
         words = request.text.split()
         if len(words) <= WORDS_PER_CHUNK:
-            labeled = _label_chunk(client, request.text)
+            # Single call — fast for most transcripts
+            labeled = await asyncio.get_event_loop().run_in_executor(
+                None, _label_chunk, client, request.text
+            )
         else:
-            parts = []
-            for i in range(0, len(words), WORDS_PER_CHUNK):
-                chunk = " ".join(words[i: i + WORDS_PER_CHUNK])
-                tail = parts[-1][-300:] if parts else ""
-                parts.append(_label_chunk(client, chunk, tail))
-            labeled = "\n".join(parts)
+            # Split into chunks and process in parallel
+            chunks = [
+                " ".join(words[i: i + WORDS_PER_CHUNK])
+                for i in range(0, len(words), WORDS_PER_CHUNK)
+            ]
+            with ThreadPoolExecutor() as pool:
+                loop = asyncio.get_event_loop()
+                results = await asyncio.gather(*[
+                    loop.run_in_executor(pool, _label_chunk, client, chunk)
+                    for chunk in chunks
+                ])
+            labeled = "\n".join(results)
         return JSONResponse({"labeled_transcript": labeled})
     except Exception:
         return JSONResponse({"labeled_transcript": request.text})
