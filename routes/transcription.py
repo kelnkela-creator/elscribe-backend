@@ -14,7 +14,7 @@ ALLOWED_EXTENSIONS = {
     'mov', 'avi', 'mkv', 'webm', 'mpeg'
 }
 MAX_FILE_SIZE_MB = 500
-WHISPER_MAX_MB = 24  # Whisper API limit is 25MB
+WHISPER_MAX_MB = 24
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
@@ -30,7 +30,6 @@ class LabelRequest(BaseModel):
 
 @router.post("/label")
 async def label_transcript(request: LabelRequest, user: dict = Depends(verify_token)):
-    """Add speaker/Q&A labels to a raw transcript using GPT."""
     client = get_openai_client()
     try:
         response = client.chat.completions.create(
@@ -56,7 +55,7 @@ async def label_transcript(request: LabelRequest, user: dict = Depends(verify_to
         )
         labeled = response.choices[0].message.content.strip()
         return JSONResponse({"labeled_transcript": labeled})
-    except Exception as e:
+    except Exception:
         return JSONResponse({"labeled_transcript": request.text})
 
 
@@ -94,7 +93,7 @@ async def transcribe(
         except Exception:
             pass
 
-        # Compress to mp3 if file exceeds Whisper's 25MB limit
+        # Compress if file exceeds Whisper's 25MB limit
         transcribe_path = tmp_path
         if size_mb > WHISPER_MAX_MB:
             try:
@@ -107,26 +106,59 @@ async def transcribe(
                 if os.path.exists(compressed_path):
                     transcribe_path = compressed_path
             except Exception:
-                pass  # fall back to original file
+                pass
 
         client = get_openai_client()
-        with open(transcribe_path, 'rb') as audio_file:
-            response = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="en",
-                response_format="verbose_json",
-            )
 
-        raw_text = response.text
-
-        # Extract time-aligned segments for audio highlighting in the app
+        # Try verbose_json first (gives timestamps); fall back to plain text
+        raw_text = ''
         segments = []
-        if hasattr(response, 'segments') and response.segments:
-            segments = [
-                {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
-                for s in response.segments
-            ]
+        try:
+            with open(transcribe_path, 'rb') as audio_file:
+                response = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    language="en",
+                    response_format="verbose_json",
+                )
+            # Extract text — handle both object and dict style responses
+            if isinstance(response, str):
+                raw_text = response
+            elif isinstance(response, dict):
+                raw_text = response.get('text', '')
+                for s in response.get('segments', []):
+                    segments.append({
+                        "start": round(float(s['start']), 2),
+                        "end": round(float(s['end']), 2),
+                        "text": s['text'].strip(),
+                    })
+            else:
+                raw_text = getattr(response, 'text', '') or ''
+                raw_segs = getattr(response, 'segments', None) or []
+                for s in raw_segs:
+                    if isinstance(s, dict):
+                        segments.append({
+                            "start": round(float(s['start']), 2),
+                            "end": round(float(s['end']), 2),
+                            "text": s['text'].strip(),
+                        })
+                    else:
+                        segments.append({
+                            "start": round(float(s.start), 2),
+                            "end": round(float(s.end), 2),
+                            "text": s.text.strip(),
+                        })
+        except Exception:
+            # Fall back to plain text format if verbose_json fails
+            with open(transcribe_path, 'rb') as audio_file:
+                response = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    language="en",
+                    response_format="text",
+                )
+            raw_text = response if isinstance(response, str) else response.text
+            segments = []
 
         return JSONResponse({
             "transcript": raw_text,
