@@ -1,5 +1,6 @@
 import math
 import asyncio
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -8,6 +9,7 @@ import openai
 import tempfile
 import os
 import subprocess
+from firebase_admin import storage as fb_storage
 from services.firebase_service import verify_token
 
 router = APIRouter()
@@ -21,6 +23,27 @@ MAX_FILE_SIZE_MB = 500
 WHISPER_MAX_MB   = 24    # Whisper API hard limit
 CHUNK_DURATION   = 1200  # 20-minute chunks for very long audio
 OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
+
+
+def _upload_audio_to_storage(uid: str, local_path: str) -> str:
+    """Upload extracted MP3 to Firebase Storage; return a permanent download URL."""
+    try:
+        bucket = fb_storage.bucket()
+        if not bucket.name:
+            return ''
+        token = str(uuid.uuid4())
+        blob_name = f'audio/{uid}/{uuid.uuid4()}.mp3'
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(local_path, content_type='audio/mpeg')
+        blob.metadata = {'firebaseStorageDownloadTokens': token}
+        blob.patch()
+        encoded = blob_name.replace('/', '%2F')
+        return (
+            f'https://firebasestorage.googleapis.com/v0/b/{bucket.name}'
+            f'/o/{encoded}?alt=media&token={token}'
+        )
+    except Exception:
+        return ''
 
 
 def get_openai_client():
@@ -228,11 +251,20 @@ async def transcribe(
                 segments.extend(s)
             raw_text = ' '.join(all_texts)
 
+        # For video files, upload extracted audio so the client can play it back
+        audio_url = ''
+        if audio_ok and ext in VIDEO_EXTENSIONS:
+            uid = user.get('uid', 'unknown')
+            audio_url = await asyncio.get_event_loop().run_in_executor(
+                None, _upload_audio_to_storage, uid, audio_path
+            )
+
         return JSONResponse({
             "transcript": raw_text,
             "segments": segments,
             "duration_seconds": duration_seconds,
             "filename": file.filename,
+            "audio_url": audio_url,
         })
 
     except openai.APIError as e:

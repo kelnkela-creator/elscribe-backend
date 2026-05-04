@@ -16,7 +16,9 @@ def _init_firebase():
         cred = credentials.Certificate(cred_dict)
     else:
         cred = credentials.Certificate("firebase-service-account.json")
-    firebase_admin.initialize_app(cred)
+    bucket = os.getenv("FIREBASE_STORAGE_BUCKET", "")
+    options = {'storageBucket': bucket} if bucket else {}
+    firebase_admin.initialize_app(cred, options)
     _initialized = True
 
 _init_firebase()
