@@ -180,11 +180,7 @@ async def transcribe(
                  '-b:a', '32k', '-y', audio_path],
                 capture_output=True, timeout=300
             )
-            audio_ok = (
-                proc.returncode == 0
-                and os.path.exists(audio_path)
-                and os.path.getsize(audio_path) > 1000
-            )
+            audio_ok = os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000
         except Exception:
             pass
 
