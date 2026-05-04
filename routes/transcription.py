@@ -1,3 +1,4 @@
+import math
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -14,14 +15,58 @@ ALLOWED_EXTENSIONS = {
     'mov', 'avi', 'mkv', 'webm', 'mpeg'
 }
 MAX_FILE_SIZE_MB = 500
-WHISPER_MAX_MB = 24
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+WHISPER_MAX_MB = 24       # Whisper API hard limit
+CHUNK_DURATION  = 1200    # 20-minute chunks for very long audio
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY")
 
 
 def get_openai_client():
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured")
     return openai.OpenAI(api_key=OPENAI_API_KEY)
+
+
+def _transcribe_single(client, path: str, time_offset: float) -> tuple:
+    """Transcribe one file; try verbose_json for timestamps, fall back to text."""
+    try:
+        with open(path, 'rb') as f:
+            response = client.audio.transcriptions.create(
+                model="whisper-1", file=f, language="en",
+                response_format="verbose_json",
+            )
+        if isinstance(response, str):
+            return response, []
+        elif isinstance(response, dict):
+            text = response.get('text', '')
+            segs = [
+                {"start": round(float(s['start']) + time_offset, 2),
+                 "end":   round(float(s['end'])   + time_offset, 2),
+                 "text":  s['text'].strip()}
+                for s in response.get('segments', [])
+            ]
+            return text, segs
+        else:
+            text = getattr(response, 'text', '') or ''
+            segs = []
+            for s in (getattr(response, 'segments', None) or []):
+                if isinstance(s, dict):
+                    segs.append({"start": round(float(s['start']) + time_offset, 2),
+                                 "end":   round(float(s['end'])   + time_offset, 2),
+                                 "text":  s['text'].strip()})
+                else:
+                    segs.append({"start": round(float(s.start) + time_offset, 2),
+                                 "end":   round(float(s.end)   + time_offset, 2),
+                                 "text":  s.text.strip()})
+            return text, segs
+    except Exception:
+        # Fall back to plain text if verbose_json fails
+        with open(path, 'rb') as f:
+            response = client.audio.transcriptions.create(
+                model="whisper-1", file=f, language="en",
+                response_format="text",
+            )
+        raw = response if isinstance(response, str) else getattr(response, 'text', '')
+        return raw, []
 
 
 class LabelRequest(BaseModel):
@@ -53,8 +98,7 @@ async def label_transcript(request: LabelRequest, user: dict = Depends(verify_to
             max_tokens=3000,
             temperature=0,
         )
-        labeled = response.choices[0].message.content.strip()
-        return JSONResponse({"labeled_transcript": labeled})
+        return JSONResponse({"labeled_transcript": response.choices[0].message.content.strip()})
     except Exception:
         return JSONResponse({"labeled_transcript": request.text})
 
@@ -79,9 +123,10 @@ async def transcribe(
         tmp.write(content)
         tmp_path = tmp.name
 
-    compressed_path = None
+    extra_paths = []
 
     try:
+        # Get duration
         duration_seconds = 0
         try:
             result = subprocess.run(
@@ -93,72 +138,57 @@ async def transcribe(
         except Exception:
             pass
 
-        # Compress if file exceeds Whisper's 25MB limit
-        transcribe_path = tmp_path
-        if size_mb > WHISPER_MAX_MB:
-            try:
-                compressed_path = tmp_path + '_compressed.mp3'
-                subprocess.run(
-                    ['ffmpeg', '-i', tmp_path, '-vn', '-ar', '16000', '-ac', '1',
-                     '-b:a', '32k', '-y', compressed_path],
-                    capture_output=True, timeout=300
-                )
-                if os.path.exists(compressed_path):
-                    transcribe_path = compressed_path
-            except Exception:
-                pass
-
         client = get_openai_client()
-
-        # Try verbose_json first (gives timestamps); fall back to plain text
         raw_text = ''
         segments = []
+
+        # Always compress to 16kbps mono mp3 (fits ~3.3 hrs in 25MB)
+        compressed_path = tmp_path + '_audio.mp3'
+        extra_paths.append(compressed_path)
         try:
-            with open(transcribe_path, 'rb') as audio_file:
-                response = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    language="en",
-                    response_format="verbose_json",
-                )
-            # Extract text — handle both object and dict style responses
-            if isinstance(response, str):
-                raw_text = response
-            elif isinstance(response, dict):
-                raw_text = response.get('text', '')
-                for s in response.get('segments', []):
-                    segments.append({
-                        "start": round(float(s['start']), 2),
-                        "end": round(float(s['end']), 2),
-                        "text": s['text'].strip(),
-                    })
-            else:
-                raw_text = getattr(response, 'text', '') or ''
-                raw_segs = getattr(response, 'segments', None) or []
-                for s in raw_segs:
-                    if isinstance(s, dict):
-                        segments.append({
-                            "start": round(float(s['start']), 2),
-                            "end": round(float(s['end']), 2),
-                            "text": s['text'].strip(),
-                        })
-                    else:
-                        segments.append({
-                            "start": round(float(s.start), 2),
-                            "end": round(float(s.end), 2),
-                            "text": s.text.strip(),
-                        })
+            subprocess.run(
+                ['ffmpeg', '-i', tmp_path, '-vn', '-ar', '16000', '-ac', '1',
+                 '-b:a', '16k', '-y', compressed_path],
+                capture_output=True, timeout=300
+            )
         except Exception:
-            # Fall back to plain text format if verbose_json fails
-            with open(transcribe_path, 'rb') as audio_file:
-                response = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    language="en",
-                    response_format="text",
-                )
-            raw_text = response if isinstance(response, str) else response.text
-            segments = []
+            compressed_path = None
+
+        compressed_ok = (
+            compressed_path and
+            os.path.exists(compressed_path) and
+            os.path.getsize(compressed_path) / (1024 * 1024) <= WHISPER_MAX_MB
+        )
+
+        if compressed_ok:
+            # Single call — covers audio up to ~3.3 hours
+            raw_text, segments = _transcribe_single(client, compressed_path, 0.0)
+        else:
+            # File too long: split into 20-minute chunks
+            n_chunks = max(1, math.ceil(duration_seconds / CHUNK_DURATION))
+            chunk_paths = []
+            for i in range(n_chunks):
+                start = i * CHUNK_DURATION
+                cpath = f'{tmp_path}_chunk_{i}.mp3'
+                extra_paths.append(cpath)
+                try:
+                    subprocess.run(
+                        ['ffmpeg', '-i', tmp_path,
+                         '-ss', str(start), '-t', str(CHUNK_DURATION),
+                         '-vn', '-ar', '16000', '-ac', '1', '-b:a', '16k', '-y', cpath],
+                        capture_output=True, timeout=120
+                    )
+                    if os.path.exists(cpath) and os.path.getsize(cpath) > 500:
+                        chunk_paths.append((cpath, float(start)))
+                except Exception:
+                    pass
+
+            all_texts = []
+            for cpath, offset in chunk_paths:
+                t, s = _transcribe_single(client, cpath, offset)
+                all_texts.append(t)
+                segments.extend(s)
+            raw_text = ' '.join(all_texts)
 
         return JSONResponse({
             "transcript": raw_text,
@@ -170,9 +200,13 @@ async def transcribe(
     except openai.APIError as e:
         raise HTTPException(status_code=502, detail=f"Transcription service error: {str(e)}")
     finally:
-        os.unlink(tmp_path)
-        if compressed_path and os.path.exists(compressed_path):
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        for p in extra_paths:
             try:
-                os.unlink(compressed_path)
+                if p and os.path.exists(p):
+                    os.unlink(p)
             except Exception:
                 pass
