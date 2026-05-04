@@ -15,9 +15,9 @@ ALLOWED_EXTENSIONS = {
     'mov', 'avi', 'mkv', 'webm', 'mpeg'
 }
 MAX_FILE_SIZE_MB = 500
-WHISPER_MAX_MB = 24       # Whisper API hard limit
-CHUNK_DURATION  = 1200    # 20-minute chunks for very long audio
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY")
+WHISPER_MAX_MB   = 24    # Whisper API hard limit
+CHUNK_DURATION   = 1200  # 20-minute chunks for very long audio
+OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
 
 
 def get_openai_client():
@@ -142,27 +142,27 @@ async def transcribe(
         raw_text = ''
         segments = []
 
-        # Always compress to 16kbps mono mp3 (fits ~3.3 hrs in 25MB)
-        compressed_path = tmp_path + '_audio.mp3'
-        extra_paths.append(compressed_path)
+        # Extract audio as 32kbps mono mp3 (good quality for Whisper, fits ~1.6 hrs in 25MB)
+        audio_path = tmp_path + '_audio.mp3'
+        extra_paths.append(audio_path)
+        audio_ok = False
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 ['ffmpeg', '-i', tmp_path, '-vn', '-ar', '16000', '-ac', '1',
-                 '-b:a', '16k', '-y', compressed_path],
+                 '-b:a', '32k', '-y', audio_path],
                 capture_output=True, timeout=300
             )
+            audio_ok = os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000
         except Exception:
-            compressed_path = None
+            pass
 
-        compressed_ok = (
-            compressed_path and
-            os.path.exists(compressed_path) and
-            os.path.getsize(compressed_path) / (1024 * 1024) <= WHISPER_MAX_MB
-        )
+        # Use original file if ffmpeg failed
+        transcribe_source = audio_path if audio_ok else tmp_path
+        source_mb = os.path.getsize(transcribe_source) / (1024 * 1024)
 
-        if compressed_ok:
-            # Single call — covers audio up to ~3.3 hours
-            raw_text, segments = _transcribe_single(client, compressed_path, 0.0)
+        if source_mb <= WHISPER_MAX_MB:
+            # Single call — covers audio up to ~1.6 hours
+            raw_text, segments = _transcribe_single(client, transcribe_source, 0.0)
         else:
             # File too long: split into 20-minute chunks
             n_chunks = max(1, math.ceil(duration_seconds / CHUNK_DURATION))
@@ -175,8 +175,8 @@ async def transcribe(
                     subprocess.run(
                         ['ffmpeg', '-i', tmp_path,
                          '-ss', str(start), '-t', str(CHUNK_DURATION),
-                         '-vn', '-ar', '16000', '-ac', '1', '-b:a', '16k', '-y', cpath],
-                        capture_output=True, timeout=120
+                         '-vn', '-ar', '16000', '-ac', '1', '-b:a', '32k', '-y', cpath],
+                        capture_output=True, timeout=180
                     )
                     if os.path.exists(cpath) and os.path.getsize(cpath) > 500:
                         chunk_paths.append((cpath, float(start)))
