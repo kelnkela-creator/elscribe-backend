@@ -14,6 +14,7 @@ ALLOWED_EXTENSIONS = {
     'mov', 'avi', 'mkv', 'webm', 'mpeg'
 }
 MAX_FILE_SIZE_MB = 500
+WHISPER_MAX_MB = 24  # Whisper API limit is 25MB
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
@@ -79,6 +80,8 @@ async def transcribe(
         tmp.write(content)
         tmp_path = tmp.name
 
+    compressed_path = None
+
     try:
         duration_seconds = 0
         try:
@@ -91,19 +94,43 @@ async def transcribe(
         except Exception:
             pass
 
+        # Compress to mp3 if file exceeds Whisper's 25MB limit
+        transcribe_path = tmp_path
+        if size_mb > WHISPER_MAX_MB:
+            try:
+                compressed_path = tmp_path + '_compressed.mp3'
+                subprocess.run(
+                    ['ffmpeg', '-i', tmp_path, '-vn', '-ar', '16000', '-ac', '1',
+                     '-b:a', '32k', '-y', compressed_path],
+                    capture_output=True, timeout=300
+                )
+                if os.path.exists(compressed_path):
+                    transcribe_path = compressed_path
+            except Exception:
+                pass  # fall back to original file
+
         client = get_openai_client()
-        with open(tmp_path, 'rb') as audio_file:
+        with open(transcribe_path, 'rb') as audio_file:
             response = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
                 language="en",
-                response_format="text",
+                response_format="verbose_json",
             )
 
-        raw_text = response if isinstance(response, str) else response.text
+        raw_text = response.text
+
+        # Extract time-aligned segments for audio highlighting in the app
+        segments = []
+        if hasattr(response, 'segments') and response.segments:
+            segments = [
+                {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
+                for s in response.segments
+            ]
 
         return JSONResponse({
             "transcript": raw_text,
+            "segments": segments,
             "duration_seconds": duration_seconds,
             "filename": file.filename,
         })
@@ -112,3 +139,8 @@ async def transcribe(
         raise HTTPException(status_code=502, detail=f"Transcription service error: {str(e)}")
     finally:
         os.unlink(tmp_path)
+        if compressed_path and os.path.exists(compressed_path):
+            try:
+                os.unlink(compressed_path)
+            except Exception:
+                pass
