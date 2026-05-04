@@ -174,20 +174,24 @@ async def transcribe(
         audio_path = tmp_path + '_audio.mp3'
         extra_paths.append(audio_path)
         audio_ok = False
+        ffmpeg_error = ''
         try:
             proc = subprocess.run(
                 ['ffmpeg', '-i', tmp_path, '-vn', '-ar', '16000', '-ac', '1',
                  '-b:a', '32k', '-y', audio_path],
                 capture_output=True, timeout=300
             )
+            ffmpeg_error = proc.stderr.decode('utf-8', errors='replace')[-800:]
             audio_ok = os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000
-        except Exception:
-            pass
+        except FileNotFoundError:
+            ffmpeg_error = 'ffmpeg not found on server'
+        except Exception as e:
+            ffmpeg_error = str(e)
 
         if not audio_ok and ext in VIDEO_EXTENSIONS:
             raise HTTPException(
                 status_code=422,
-                detail="Could not extract audio from video file. Ensure the file contains an audio track."
+                detail=f"Could not extract audio from video file. ffmpeg output: {ffmpeg_error}"
             )
 
         # Use original file only if ffmpeg failed on a pure-audio format
