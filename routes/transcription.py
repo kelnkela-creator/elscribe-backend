@@ -16,6 +16,7 @@ ALLOWED_EXTENSIONS = {
     'mp3', 'mp4', 'wav', 'm4a', 'ogg', 'flac',
     'mov', 'avi', 'mkv', 'webm', 'mpeg'
 }
+VIDEO_EXTENSIONS = {'mp4', 'mov', 'avi', 'mkv', 'webm', 'mpeg'}
 MAX_FILE_SIZE_MB = 500
 WHISPER_MAX_MB   = 24    # Whisper API hard limit
 CHUNK_DURATION   = 1200  # 20-minute chunks for very long audio
@@ -179,11 +180,21 @@ async def transcribe(
                  '-b:a', '32k', '-y', audio_path],
                 capture_output=True, timeout=300
             )
-            audio_ok = os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000
+            audio_ok = (
+                proc.returncode == 0
+                and os.path.exists(audio_path)
+                and os.path.getsize(audio_path) > 1000
+            )
         except Exception:
             pass
 
-        # Use original file if ffmpeg failed
+        if not audio_ok and ext in VIDEO_EXTENSIONS:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not extract audio from video file. Ensure the file contains an audio track."
+            )
+
+        # Use original file only if ffmpeg failed on a pure-audio format
         transcribe_source = audio_path if audio_ok else tmp_path
         source_mb = os.path.getsize(transcribe_source) / (1024 * 1024)
 
