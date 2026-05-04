@@ -73,32 +73,51 @@ class LabelRequest(BaseModel):
     text: str
 
 
+LABEL_SYSTEM = (
+    "You are a transcript formatter. Format with speaker labels.\n"
+    "Rules:\n"
+    "- Multiple speakers (interview/conversation/Q&A): label as [Speaker 1]:, [Speaker 2]:, etc.\n"
+    "- Clear Q&A sections: use [Question]: and [Answer]:\n"
+    "- Single speaker (monologue/lecture): return text as-is, no labels\n"
+    "- Each speaker segment on its own line\n"
+    "- Keep EVERY word exactly unchanged — do NOT skip or summarize anything\n"
+    "- Output ONLY the formatted transcript"
+)
+WORDS_PER_CHUNK = 1200  # safe chunk size so output never hits token limit
+
+
+def _label_chunk(client, text: str, prev_tail: str = "") -> str:
+    system = LABEL_SYSTEM
+    if prev_tail:
+        system += f"\n\nEnd of previous section (for speaker continuity):\n{prev_tail}"
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": text}],
+            max_tokens=4000,
+            temperature=0,
+        )
+        return r.choices[0].message.content.strip()
+    except Exception:
+        return text
+
+
 @router.post("/label")
 async def label_transcript(request: LabelRequest, user: dict = Depends(verify_token)):
     client = get_openai_client()
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a transcript formatter. Format with speaker labels.\n"
-                        "Rules:\n"
-                        "- Multiple speakers (interview/conversation/Q&A): label as [Speaker 1]:, [Speaker 2]:, etc.\n"
-                        "- Clear Q&A sections: use [Question]: and [Answer]:\n"
-                        "- Single speaker (monologue/lecture): return text as-is, no labels\n"
-                        "- Each speaker segment on its own line\n"
-                        "- Keep original words exactly unchanged\n"
-                        "- Output ONLY the formatted transcript"
-                    ),
-                },
-                {"role": "user", "content": request.text},
-            ],
-            max_tokens=3000,
-            temperature=0,
-        )
-        return JSONResponse({"labeled_transcript": response.choices[0].message.content.strip()})
+        words = request.text.split()
+        if len(words) <= WORDS_PER_CHUNK:
+            labeled = _label_chunk(client, request.text)
+        else:
+            parts = []
+            for i in range(0, len(words), WORDS_PER_CHUNK):
+                chunk = " ".join(words[i: i + WORDS_PER_CHUNK])
+                tail = parts[-1][-300:] if parts else ""
+                parts.append(_label_chunk(client, chunk, tail))
+            labeled = "\n".join(parts)
+        return JSONResponse({"labeled_transcript": labeled})
     except Exception:
         return JSONResponse({"labeled_transcript": request.text})
 
