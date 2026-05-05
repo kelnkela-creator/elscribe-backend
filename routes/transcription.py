@@ -26,21 +26,16 @@ OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
 
 
 def _upload_audio_to_storage(uid: str, local_path: str) -> str:
-    """Upload extracted MP3 to Firebase Storage; return a permanent download URL."""
+    """Upload extracted MP3 to Firebase Storage; return a public URL."""
     try:
         bucket = fb_storage.bucket()
         if not bucket.name:
             return 'error:no_bucket'
-        token = str(uuid.uuid4())
         blob_name = f'audio/{uid}/{uuid.uuid4()}.mp3'
         blob = bucket.blob(blob_name)
-        blob.metadata = {'firebaseStorageDownloadTokens': token}
         blob.upload_from_filename(local_path, content_type='audio/mpeg')
-        encoded = blob_name.replace('/', '%2F')
-        return (
-            f'https://firebasestorage.googleapis.com/v0/b/{bucket.name}'
-            f'/o/{encoded}?alt=media&token={token}'
-        )
+        blob.make_public()
+        return blob.public_url
     except Exception as e:
         return f'error:{str(e)[:200]}'
 
