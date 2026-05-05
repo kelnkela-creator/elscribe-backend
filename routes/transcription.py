@@ -1,6 +1,8 @@
 import math
 import asyncio
 import uuid
+import json
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -9,7 +11,8 @@ import openai
 import tempfile
 import os
 import subprocess
-from firebase_admin import storage as fb_storage
+from google.oauth2 import service_account as sa_module
+from google.cloud import storage as gcs
 from services.firebase_service import verify_token
 
 router = APIRouter()
@@ -26,18 +29,31 @@ OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
 
 
 def _upload_audio_to_storage(uid: str, local_path: str) -> str:
-    """Upload extracted MP3 to Firebase Storage; return a public URL."""
+    """Upload extracted MP3 to Firebase Storage; return a signed URL valid 2 years."""
     try:
-        bucket = fb_storage.bucket()
-        if not bucket.name:
-            return 'error:no_bucket'
+        sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "{}")
+        sa_info = json.loads(sa_json)
+        bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET", "")
+        if not bucket_name or not sa_info.get('project_id'):
+            return 'error:no_config'
+        creds = sa_module.Credentials.from_service_account_info(
+            sa_info,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        client = gcs.Client(credentials=creds, project=sa_info.get('project_id'))
+        bucket = client.bucket(bucket_name)
         blob_name = f'audio/{uid}/{uuid.uuid4()}.mp3'
         blob = bucket.blob(blob_name)
         blob.upload_from_filename(local_path, content_type='audio/mpeg')
-        blob.make_public()
-        return blob.public_url
+        url = blob.generate_signed_url(
+            version='v2',
+            expiration=timedelta(days=730),
+            method='GET',
+            credentials=creds,
+        )
+        return url
     except Exception as e:
-        return f'error:{str(e)[:200]}'
+        return f'error:{str(e)[:300]}'
 
 
 def get_openai_client():
