@@ -30,20 +30,19 @@ def _upload_audio_to_storage(uid: str, local_path: str) -> str:
     try:
         bucket = fb_storage.bucket()
         if not bucket.name:
-            return ''
+            return 'error:no_bucket'
         token = str(uuid.uuid4())
         blob_name = f'audio/{uid}/{uuid.uuid4()}.mp3'
         blob = bucket.blob(blob_name)
-        blob.upload_from_filename(local_path, content_type='audio/mpeg')
         blob.metadata = {'firebaseStorageDownloadTokens': token}
-        blob.patch()
+        blob.upload_from_filename(local_path, content_type='audio/mpeg')
         encoded = blob_name.replace('/', '%2F')
         return (
             f'https://firebasestorage.googleapis.com/v0/b/{bucket.name}'
             f'/o/{encoded}?alt=media&token={token}'
         )
-    except Exception:
-        return ''
+    except Exception as e:
+        return f'error:{str(e)[:200]}'
 
 
 def get_openai_client():
