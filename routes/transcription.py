@@ -221,11 +221,23 @@ async def transcribe(
         transcribe_source = audio_path if audio_ok else tmp_path
         source_mb = os.path.getsize(transcribe_source) / (1024 * 1024)
 
+        uid = user.get('uid', 'unknown')
+        loop = asyncio.get_event_loop()
+
         if source_mb <= WHISPER_MAX_MB:
-            # Single call — covers audio up to ~1.6 hours
-            raw_text, segments = _transcribe_single(client, transcribe_source, 0.0)
+            # Run Whisper and Firebase Storage upload concurrently for video files
+            if audio_ok and ext in VIDEO_EXTENSIONS:
+                (raw_text, segments), audio_url = await asyncio.gather(
+                    loop.run_in_executor(None, _transcribe_single, client, transcribe_source, 0.0),
+                    loop.run_in_executor(None, _upload_audio_to_storage, uid, audio_path),
+                )
+            else:
+                raw_text, segments = await loop.run_in_executor(
+                    None, _transcribe_single, client, transcribe_source, 0.0)
+                audio_url = ''
         else:
             # File too long: split into 20-minute chunks
+            audio_url = ''
             n_chunks = max(1, math.ceil(duration_seconds / CHUNK_DURATION))
             chunk_paths = []
             for i in range(n_chunks):
@@ -244,20 +256,22 @@ async def transcribe(
                 except Exception:
                     pass
 
-            all_texts = []
-            for cpath, offset in chunk_paths:
-                t, s = _transcribe_single(client, cpath, offset)
-                all_texts.append(t)
-                segments.extend(s)
-            raw_text = ' '.join(all_texts)
+            tasks = [loop.run_in_executor(None, _transcribe_single, client, cp, off)
+                     for cp, off in chunk_paths]
+            if audio_ok and ext in VIDEO_EXTENSIONS:
+                tasks.append(loop.run_in_executor(None, _upload_audio_to_storage, uid, audio_path))
+                results = await asyncio.gather(*tasks)
+                audio_url = results[-1]
+                results = results[:-1]
+            else:
+                results = await asyncio.gather(*tasks)
 
-        # For video files, upload extracted audio so the client can play it back
-        audio_url = ''
-        if audio_ok and ext in VIDEO_EXTENSIONS:
-            uid = user.get('uid', 'unknown')
-            audio_url = await asyncio.get_event_loop().run_in_executor(
-                None, _upload_audio_to_storage, uid, audio_path
-            )
+            all_texts, all_segs = [], []
+            for t, s in results:
+                all_texts.append(t)
+                all_segs.extend(s)
+            raw_text = ' '.join(all_texts)
+            segments = all_segs
 
         return JSONResponse({
             "transcript": raw_text,
