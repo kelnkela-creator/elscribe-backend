@@ -53,6 +53,9 @@ def _upload_audio_to_storage(uid: str, local_path: str) -> str:
         )
         return url
     except Exception as e:
+        import traceback
+        print(f"[AUDIO UPLOAD ERROR] {str(e)}")
+        print(traceback.format_exc())
         return f'error:{str(e)[:300]}'
 
 
