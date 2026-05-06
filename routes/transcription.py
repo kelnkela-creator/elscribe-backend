@@ -122,7 +122,7 @@ LABEL_SYSTEM = (
     "- Keep EVERY word exactly unchanged — do NOT skip or summarize anything\n"
     "- Output ONLY the formatted transcript"
 )
-WORDS_PER_CHUNK = 4000   # large chunks → fewer API calls; 16k output tokens handles this easily
+WORDS_PER_CHUNK = 800   # smaller chunks → more parallel calls → faster overall
 
 
 def _label_chunk(client, text: str) -> str:
@@ -131,7 +131,7 @@ def _label_chunk(client, text: str) -> str:
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": LABEL_SYSTEM},
                       {"role": "user", "content": text}],
-            max_tokens=16000,
+            max_tokens=4096,
             temperature=0,
         )
         return r.choices[0].message.content.strip()
