@@ -13,7 +13,8 @@ import os
 import subprocess
 from google.oauth2 import service_account as sa_module
 from google.cloud import storage as gcs
-from services.firebase_service import verify_token
+from datetime import datetime, timezone
+from services.firebase_service import verify_token, db
 
 router = APIRouter()
 
@@ -167,11 +168,27 @@ async def label_transcript(request: LabelRequest, user: dict = Depends(verify_to
         return JSONResponse({"labeled_transcript": request.text})
 
 
+def _check_subscription(uid: str):
+    doc = db.collection("users").document(uid).get()
+    if not doc.exists:
+        raise HTTPException(status_code=403, detail="No active subscription. Please start a trial or subscribe.")
+    data = doc.to_dict() or {}
+    status = data.get("subscriptionStatus", "none")
+    if status == "trial":
+        trial_ends = data.get("trialEndsAt")
+        if trial_ends and hasattr(trial_ends, "timestamp"):
+            if trial_ends.timestamp() < datetime.now(timezone.utc).timestamp():
+                raise HTTPException(status_code=403, detail="Your free trial has expired. Please subscribe to continue.")
+    elif status != "active":
+        raise HTTPException(status_code=403, detail="No active subscription. Please subscribe to continue.")
+
+
 @router.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
     user: dict = Depends(verify_token),
 ):
+    _check_subscription(user.get("uid", ""))
     ext = file.filename.split('.')[-1].lower() if file.filename else ''
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400,
