@@ -255,8 +255,8 @@ async def transcribe(
         loop = asyncio.get_event_loop()
 
         if source_mb <= WHISPER_MAX_MB:
-            # Run Whisper and Firebase Storage upload concurrently for video files
-            if audio_ok and ext in VIDEO_EXTENSIONS:
+            # Run Whisper and Firebase Storage upload concurrently for all file types
+            if audio_ok:
                 (raw_text, segments), audio_url = await asyncio.gather(
                     loop.run_in_executor(None, _transcribe_single, client, transcribe_source, 0.0),
                     loop.run_in_executor(None, _upload_audio_to_storage, uid, audio_path),
@@ -288,7 +288,7 @@ async def transcribe(
 
             tasks = [loop.run_in_executor(None, _transcribe_single, client, cp, off)
                      for cp, off in chunk_paths]
-            if audio_ok and ext in VIDEO_EXTENSIONS:
+            if audio_ok:
                 tasks.append(loop.run_in_executor(None, _upload_audio_to_storage, uid, audio_path))
                 results = await asyncio.gather(*tasks)
                 audio_url = results[-1]
